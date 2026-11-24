@@ -225,6 +225,38 @@ SRCS = \
 	udp_apps.c \
 	crypto/chacha20.c
 
+ifeq ($(HASH_BENCH),1)
+	HASH_IMPL ?= all
+	ifneq ($(words $(HASH_IMPL)),1)
+		$(error HASH_IMPL accepts one implementation)
+	endif
+	ifeq ($(filter all ref direct asm sparse inline regs,$(HASH_IMPL)),)
+		$(error HASH_IMPL must be all, ref, direct, asm, sparse, inline or regs)
+	endif
+	CC_FLAGS += -DHASH_BENCH -DBLAKE_BUILD=BLAKE_$(HASH_IMPL)
+	ifneq ($(filter all asm sparse,$(HASH_IMPL)),)
+		BENCH_ASM += $(BUILDDIR)/crypto/blake_8051.rel
+	endif
+	ifneq ($(filter all inline,$(HASH_IMPL)),)
+		BENCH_ASM += $(BUILDDIR)/crypto/blake_inline.rel
+	endif
+	ifneq ($(filter all regs,$(HASH_IMPL)),)
+		BENCH_ASM += $(BUILDDIR)/crypto/blake_regs.rel
+	endif
+	SHA_IMPL ?= all
+	ifeq ($(filter all full ring asm,$(SHA_IMPL)),)
+		$(error SHA_IMPL must be all, full, ring or asm)
+	endif
+	ifneq ($(words $(SHA_IMPL)),1)
+		$(error SHA_IMPL accepts one implementation)
+	endif
+	CC_FLAGS += -DSHA256_BUILD=SHA256_$(SHA_IMPL)
+	ifneq ($(filter all asm,$(SHA_IMPL)),)
+		BENCH_ASM += $(BUILDDIR)/crypto/sha256_sigma.rel
+	endif
+	SRCS += crypto/blake.c crypto/sha256.c crypto/hashbench.c
+endif
+
 # RTL837x
 SRCS += \
 	rtl837x_bandwidth.c \
@@ -343,12 +375,14 @@ ifneq ($(strip $(MACHINE_DESCRIPTOR)),)
 $(BUILDDIR)/machine/pcb/$(MACHINE_PCB_NAME).rel: $(MACHINE_DESCRIPTOR)
 endif
 
+$(BUILDDIR)/crypto/blake_8051.rel $(BUILDDIR)/crypto/blake_inline.rel: crypto/blake_round.inc
+
 $(BUILDDIR)/%.rel: %.asm $(CCFLAGS_STAMP) | create_build_dir
 	${ASM} ${AFLAGS} -o $@ $<
 #	mv -f $(addprefix $(basename $^), .lst .rel .sym) .
 
 # Keep the reset vector first in HOME and append the machine descriptor last.
-$(BUILDDIR)/rtlplayground.ihx: $(STARTUP_OBJ) $(filter-out $(STARTUP_OBJ) $(MACHINE_OBJ),$(OBJS)) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16.rel $(BUILDDIR)/crypto/chacha_8051.rel $(MACHINE_OBJ)
+$(BUILDDIR)/rtlplayground.ihx: $(STARTUP_OBJ) $(filter-out $(STARTUP_OBJ) $(MACHINE_OBJ),$(OBJS)) $(BUILDDIR)/crtbank.rel $(BUILDDIR)/crc16.rel $(BUILDDIR)/crypto/chacha_8051.rel $(BENCH_ASM) $(MACHINE_OBJ)
 	$(CC) $(CC_FLAGS) $(MACHINE_CC_FLAGS) --xram-size 49151 -Wl-bHOME=0x00000 -Wl-bBANK1=0x14000 -Wl-bBANK2=0x24000 -Wl-bBANK3=0x34000 -Wl-bBANK4=0x44000 -Wl-r -o $@ $^
 
 $(BUILDDIR)/rtlplayground.img: $(BUILDDIR)/rtlplayground.ihx

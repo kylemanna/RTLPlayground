@@ -8,6 +8,9 @@
 #include <8051.h>
 #include "cmd_parser.h"
 #include "rtl837x_common.h"
+#ifdef HASH_BENCH
+#include "crypto/hashbench.h"
+#endif
 #include "rtl837x_port.h"
 #include "rtl837x_flash.h"
 #include "rtl837x_phy.h"
@@ -2028,6 +2031,20 @@ void cmd_parser(void) __banked
 			}
 		} else if (cmd_compare(0, "stp")) {
 			stp_parse();
+#ifdef HASH_BENCH
+		} else if (cmd_compare(0, "hashcheck")) {
+			if (save_cmd && !hashbench(&cmd_buffer[cmd_words_b[0] + sizeof("hashcheck") - 1], 1))
+				cmd_error("hashcheck [text] [1-64]\n");
+			return;
+		} else if (cmd_compare(0, "hashbench")) {
+			if (save_cmd && !hashbench(&cmd_buffer[cmd_words_b[0] + sizeof("hashbench") - 1], 0))
+#if BLAKE_BUILD == BLAKE_all
+				cmd_error("hashbench [--ref|--direct|--asm|--sparse|--inline|--regs] [text] [1-64]\n");
+#else
+				cmd_error("hashbench [text] [1-64]\n");
+#endif
+			return;
+#endif
 #ifdef HEALTH
 		} else if (cmd_compare(0, "health")) {
 			health_show();
