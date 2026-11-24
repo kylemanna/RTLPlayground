@@ -24,7 +24,8 @@ LDFLAGS  = -fsanitize=address,undefined
 BUILDDIR = build
 
 # One binary per subsystem under test.
-TESTS = $(BUILDDIR)/test_cmd_editor \
+TESTS = $(BUILDDIR)/test_hashbench $(BUILDDIR)/test_hashbench_direct \
+        $(BUILDDIR)/test_cmd_editor \
         $(BUILDDIR)/test_port_tables \
         $(BUILDDIR)/test_page_json \
         $(BUILDDIR)/test_httpd_tx \
@@ -51,6 +52,10 @@ stp:
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
+
+$(BUILDDIR)/test_hashbench_direct: CFLAGS += -DBLAKE_BUILD=BLAKE_direct
+$(BUILDDIR)/test_hashbench $(BUILDDIR)/test_hashbench_direct: test_hashbench.c $(SRCROOT)/crypto/hashbench.c $(SRCROOT)/crypto/blake.c $(SRCROOT)/crypto/sha256.c $(SRCROOT)/crypto/hashbench.h | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@ $(LDFLAGS)
 
 # cmd_editor.c is compiled UNMODIFIED from the firmware tree.
 $(BUILDDIR)/test_cmd_editor: test_cmd_editor.c support.c $(SRCROOT)/cmd_editor.c | $(BUILDDIR)
