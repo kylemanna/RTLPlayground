@@ -2,11 +2,11 @@
 
 ## Executive summary
 
-**Use BLAKE3 with the register-cached 8051 mixer. Target about 100 ms for a password login.** Start with **42 iterations** when integrating the mixer. On `sw-horaco`, 42 chained BLAKE3 digests took 100 ms in each of five runs. The optimized core fits in 1,048 bytes of flash, the smallest of the three candidates. Measure a complete HTTP login after integration to confirm the user-visible delay.
+**Use BLAKE3 with the register-cached 8051 mixer.** On `sw-horaco`, the proposed `passwd-hash` revision `ff7baf0` took **105 ms for 42 digests** and **125 ms for a fresh HTTP login**. At **32 iterations**, every timed HTTP login completed within 100 ms. At 33 iterations, the median rose to 105 ms.
 
-**For the existing C verifier on the `passwd-hash` branch, keep 15 iterations and share the HTTP request buffer.** That version took 105.58 ms per verification and saved 146 bytes of permanently allocated XRAM. A request carrying a valid session cookie skips the hash.
+The proposed core occupies 897 bytes of linked flash and uses 96 bytes of the shared HTTP request buffer. Its record stores a 4-byte salt and the first 16 bytes of the final digest. Each iteration after the first hashes the full 32-byte preceding digest. A request carrying a valid session cookie skips the hash.
 
-## Recommended implementation
+## Register-cached comparison implementation
 
 | Source on the `hashbench` branch | What it does |
 | --- | --- |
@@ -14,7 +14,48 @@
 | [Register-cached mixer in 8051 assembly](../crypto/blake_regs.asm#L142) | `_blake_regs_round` implements one round. The [`BLAKE_regs` case](../crypto/blake.c#L150) calls it. |
 | [Work factor in the benchmark](../crypto/hashbench.c#L84) | At 42 iterations, the loop hashes the input once and rehashes the preceding digest 41 times. |
 
-To reproduce the 100 ms measurement on a benchmark image, run **`hashbench --regs 42`** in the switch console and read the `BLAKE3` row.
+To reproduce the earlier 100 ms digest-chain measurement on a `hashbench` image, run **`hashbench --regs 42`** in the switch console and read the `BLAKE3` row.
+
+## Horaco retest on 2026-11-27
+
+A disposable benchmark image ran all 15 comparison paths and the production digest core from `ff7baf0`. The original paths started with bytes 0–35. The production row started with bytes 0–23 to model a 4-byte salt and a 20-byte password. All 576 timed rows matched independent host digests. Times are medians of 12 samples per count after warm-up, with 5 ms timer resolution.
+
+| Path | Algorithm | 15 iterations | 42 iterations | 64 iterations |
+| --- | --- | ---: | ---: | ---: |
+| `ref` | BLAKE3 | 100 ms | 280 ms | 430 ms |
+| `ref` | BLAKE2s-256 | 145 ms | 400 ms | 610 ms |
+| `direct` | BLAKE3 | 85 ms | 245 ms | 375 ms |
+| `direct` | BLAKE2s-256 | 125 ms | 355 ms | 540 ms |
+| `asm` | BLAKE3 | 70 ms | 190 ms | 290 ms |
+| `asm` | BLAKE2s-256 | 95 ms | 270 ms | 415 ms |
+| `sparse` | BLAKE3 | 65 ms | 185 ms | 285 ms |
+| `sparse` | BLAKE2s-256 | 95 ms | 260 ms | 405 ms |
+| `inline` | BLAKE3 | 45 ms | 120 ms | 185 ms |
+| `inline` | BLAKE2s-256 | 60 ms | 170 ms | 265 ms |
+| `regs` | BLAKE3 | 35 ms | 100 ms | 150 ms |
+| `regs` | BLAKE2s-256 | 50 ms | 140 ms | 215 ms |
+| `full` | SHA-256 | 160 ms | 450 ms | 685 ms |
+| `ring` | SHA-256 | 160 ms | 445 ms | 680 ms |
+| `asm` | SHA-256 | 140 ms | 390 ms | 590 ms |
+| `login` | BLAKE3 | 35 ms | 105 ms | 160 ms |
+
+The standalone `ff7baf0` production image returned the expected verdict on all 360 timed HTTP logins. Each sample used a fresh TCP connection and timed `POST /login` through the redirect. The switch used the same password and salt for each count. Each outcome has 12 samples per count after warm-up, with 24 at 42 across two boots. Medians below are rounded to milliseconds.
+
+| Iterations | Correct password | Incorrect password |
+| --- | ---: | ---: |
+| 1 | 15 ms | 15 ms |
+| 31–32 | 100 ms | 100 ms |
+| 33–34 | 105 ms | 105 ms |
+| 35–36 | 110 ms | 110 ms |
+| 40 | 120 ms | 120 ms |
+| 41–42 | 125 ms | 125 ms |
+| 43–44 | 130 ms | 130 ms |
+| 45 | 135 ms | 135 ms |
+| 64 | 185 ms | 185 ms |
+
+At 32 iterations, the 24 timed HTTP samples ranged from 99.897 to 99.991 ms. The proposed 42-iteration default fits the roughly 100 ms digest budget. Choose 32 when the target is roughly 100 ms for the full HTTP request on this Horaco. Each saved record carries its own iteration count.
+
+Patched SDCC 4.6.0 builds with matched metadata show `ff7baf0` adds 1,911 bytes of linked flash over `7364fd5`. Both use 16,767 bytes of XRAM and leave 145 bytes of internal RAM for the stack. Host tests and 8051 digest vectors passed. The switch returned to `v0.1.0-bad839f` with its original saved configuration verified byte for byte.
 
 ## Motivation and goals
 
@@ -22,7 +63,7 @@ Someone who copies the switch configuration can test password guesses on a GPU w
 
 We wanted the smallest flash implementation that made good use of that budget, kept the hash workspace available to HTTP between logins, and made offline guessing as slow as practical. A faster mixer on the switch lets us require more iterations in the same login time.
 
-## Approach and results
+## Original algorithm comparison
 
 We tested six implementations each of BLAKE3 and BLAKE2s, and three of SHA-256. For each algorithm we timed a chain on the physical Horaco, selected the fastest implementation, and found the iteration count closest to 100 ms. We linked each selected core separately to measure flash and RAM. We then compared complete password guesses per second at those work factors. A lower GPU rate is better.
 
@@ -36,13 +77,13 @@ BLAKE2s slowed guessing by 2.8% on the measured Radeon but cost 144 more flash b
 
 ### What the GPU figures mean
 
-The Radeon measurements used a fixed 16-byte salt and a generated 20-byte password. Each guess hashed these together, then hashed the previous 32-byte digest for every remaining iteration. The figures are medians of nine samples after warm-up. All 24 sampled outputs matched independent host digests.
+The Radeon measurements used a fixed 16-byte salt and a generated 20-byte password. Each guess hashed these together, then hashed the previous 32-byte digest for every remaining iteration. The figures are medians of nine samples after warm-up. All 24 sampled outputs matched independent host digests. The GPU results describe this earlier fixture.
 
 On **one RTX 5090**, the estimate for 42-iteration BLAKE3 is **about 12 years on average** to find a uniformly random 10-character password drawn from `A–Z`, `a–z` and `0–9`. At 1.13 billion guesses per second, exhausting all `62^10` possibilities would take about 24 years. Human-chosen passwords can be guessed much earlier.
 
 The 5090 figure is an extrapolation. A published benchmark measured 33.59 billion raw BLAKE2s digests per second. On our Radeon, single-digest BLAKE3 was 1.41 times as fast as BLAKE2s. Applying that ratio gives `33.59 × 1.41 / 42 ≈ 1.13` billion BLAKE3 guesses per second. For BLAKE2s we used `33.59 / 30`. The SHA-256 range scales the published single- and double-hash rates to 11 digests. Exact salted-chain throughput on a 5090 is unmeasured. [RTX 5090 benchmark, modes 1400, 21400 and 31000](https://gist.github.com/Chick3nman/09bac0775e6393468c2925c1e1363d5c)
 
-## What stays in RAM between logins?
+## Earlier C verifier experiment
 
 The switch has 256 bytes of internal RAM for registers, small variables and the hardware stack. Larger buffers go in on-chip XRAM, also called XMEM or `__xdata`. RTLPlayground documents 64 KiB of XRAM. The Horaco linker budgets 49,151 bytes. Both C verifier builds leave 133 bytes for the entire stack, including interrupts. [Hardware layout](hardware.md) · [Linker settings](../Makefile) · [Stack usage](internal-ram.md)
 
@@ -74,6 +115,8 @@ Both commands accept up to 20 bytes of text and 1–64 iterations. Quote spaces,
 
 For repeated measurements, run `python3 test/bench_hashmix.py sw-horaco.home --hashcheck > samples.csv` with `b3sum` on PATH. All 360 timed rows on `f07357a` matched host references. For size comparisons we used patched SDCC 4.6.0. Core flash includes code, constants and each BLAKE core’s own schedule and mixer. The benchmark console and login parser are outside those figures. The isolated cores passed simulator checks at every supported input length, 0–64 bytes for BLAKE and 0–55 for SHA-256. [Simulator tests](../test/test_hashmix.py) · [Hardware benchmark runner](../test/bench_hashmix.py)
 
+For the 16-path retest, apply the saved `horaco-benchmark-fixture.patch` to a disposable checkout of `ff7baf0`. Build with `HASH_BENCH=1` and run that checkout’s `test/bench_hashmix.py` with `--hashcheck --iterations 15 42 64`. For HTTP timings, build `ff7baf0` separately with the default options, install each test count with a temporary `tools/passwd` record, and time fresh login requests with one correct and one incorrect password per sample. Use the session cookie to check the verdict.
+
 ## Detailed measurements
 
 ### BLAKE mixers
@@ -103,7 +146,7 @@ Timings are medians of 12 runs of 64 digests on `f07357a`. Set `SHA_IMPL=full`, 
 
 The rolling schedule saved 192 bytes of XRAM. Assembly rotations saved another 725 bytes of flash. At 10, 11 and 12 iterations the assembly version took 90, 100 and 110 ms respectively in all five runs per count. [SHA-256 core](../crypto/sha256.c) · [Assembly rotations](../crypto/sha256_sigma.asm) · [FIPS 180-4](https://doi.org/10.6028/NIST.FIPS.180-4)
 
-## Final on-device verification
+## Original on-device verification
 
 On 2026-11-23, the default `hashcheck` on `sw-horaco` (HC-SWTG124AS, firmware `v0.1.0-xram-ab1`) passed all 15 implementations at 32 iterations. Every digest matched the on-device vector and an independent host calculation with `b3sum` or Python’s `hashlib`. This transcript records one run. The work factors above come from repeated measurements.
 
